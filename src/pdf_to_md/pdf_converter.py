@@ -8,6 +8,7 @@ Each output file is prepended with a Wikilink to the original PDF.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
@@ -15,7 +16,35 @@ LOGGER = logging.getLogger(__name__)
 SUPPORTED_EXTENSIONS: set[str] = {".pdf"}
 
 
-def _extract_markdown(pdf_path: Path, image_dir: Path) -> str:
+def _patch_pymupdf4llm_image_saver() -> None:
+    """Ensure pymupdf4llm creates directories before saving images even if paths are transformed."""
+    try:
+        from pymupdf4llm.helpers import utils as llm_utils
+
+        if getattr(llm_utils, "_pdf_to_md_patched", False):
+            return
+
+        orig_md_path = llm_utils.md_path
+
+        def safe_md_path(folder: str, filename: str):
+            md_ref, save_ref = orig_md_path(folder, filename)
+            Path(save_ref).parent.mkdir(parents=True, exist_ok=True)
+            return md_ref, save_ref
+
+        llm_utils.md_path = safe_md_path
+        llm_utils._pdf_to_md_patched = True
+
+        try:
+            from pymupdf4llm.helpers import document_layout as doc_layout
+
+            doc_layout.utils.md_path = safe_md_path
+        except (ImportError, AttributeError):
+            pass
+    except (ImportError, AttributeError):
+        pass
+
+
+def _extract_markdown(pdf_path: Path, image_dir: Path, clean_stem: str) -> str:
     """Return Markdown text for *pdf_path*, saving images to *image_dir*."""
     try:
         from pymupdf4llm import to_markdown
@@ -33,13 +62,14 @@ def _extract_markdown(pdf_path: Path, image_dir: Path) -> str:
 
     if to_markdown is not None:
         try:
+            _patch_pymupdf4llm_image_saver()
             image_dir.mkdir(parents=True, exist_ok=True)
             with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
                 return to_markdown(
                     doc,
                     write_images=True,
                     image_path=str(image_dir),
-                    filename=pdf_path.stem,
+                    filename=clean_stem,
                 ).strip()
         except Exception as exc:
             LOGGER.warning(
@@ -60,9 +90,10 @@ def convert_pdf(pdf_path: Path, output_path: Path) -> None:
     Images are extracted into a sibling ``<stem>_images/`` folder next to
     *output_path*.
     """
-    image_dir = output_path.parent / f"{pdf_path.stem}_images"
+    clean_stem = re.sub(r"[\s\(\)\[\]]+", "_", pdf_path.stem)
+    image_dir = output_path.parent / f"{clean_stem}_images"
 
-    markdown_body = _extract_markdown(pdf_path, image_dir)
+    markdown_body = _extract_markdown(pdf_path, image_dir, clean_stem)
     wikilink = f"[[{pdf_path.name}]]"
     content = f"{wikilink}\n\n{markdown_body}\n" if markdown_body else f"{wikilink}\n"
 
