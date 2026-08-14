@@ -33,7 +33,7 @@ def merge_pdfs(source_dir: Path, output_path: Path) -> int:
     files merged.
     """
     try:
-        import fitz
+        import pymupdf
     except ImportError as exc:
         raise RuntimeError(
             "Missing dependency. Install pymupdf to enable PDF merging."
@@ -43,10 +43,10 @@ def merge_pdfs(source_dir: Path, output_path: Path) -> int:
     if not pdf_paths:
         raise SystemExit(f"No PDF files found in {source_dir}")
 
-    merged = fitz.open()
+    merged = pymupdf.open()
     try:
         for pdf_path in pdf_paths:
-            with fitz.open(pdf_path) as doc:
+            with pymupdf.open(pdf_path) as doc:
                 merged.insert_pdf(doc)
             LOGGER.info("Added %s", pdf_path.name)
 

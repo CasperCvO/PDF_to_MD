@@ -23,30 +23,35 @@ def _extract_markdown(pdf_path: Path, image_dir: Path) -> str:
         to_markdown = None
 
     try:
-        import fitz
+        import pymupdf
     except ImportError as exc:
         raise RuntimeError(
             "Missing dependencies. Install pymupdf4llm and pymupdf to enable extraction."
         ) from exc
 
-    with fitz.open(pdf_path) as doc:
-        if to_markdown is not None:
-            try:
-                image_dir.mkdir(parents=True, exist_ok=True)
+    pdf_bytes = pdf_path.read_bytes()
+
+    if to_markdown is not None:
+        try:
+            image_dir.mkdir(parents=True, exist_ok=True)
+            with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
                 return to_markdown(
                     doc,
                     write_images=True,
                     image_path=str(image_dir),
+                    filename=pdf_path.stem,
                 ).strip()
-            except Exception as exc:
-                LOGGER.warning(
-                    "pymupdf4llm failed for %s (%s). Falling back to PyMuPDF text.",
-                    pdf_path,
-                    exc,
-                )
+        except Exception as exc:
+            LOGGER.warning(
+                "pymupdf4llm failed for %s (%s). Falling back to PyMuPDF text.",
+                pdf_path,
+                exc,
+            )
 
+    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
         pages = [page.get_text("text").rstrip() for page in doc]
-        return "\n\n".join(page for page in pages if page).strip()
+
+    return "\n\n".join(page for page in pages if page).strip()
 
 
 def convert_pdf(pdf_path: Path, output_path: Path) -> None:
