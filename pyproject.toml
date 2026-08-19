@@ -4,18 +4,22 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pdf-to-md"
-version = "0.1.0"
-description = "Batch-convert PDFs and office documents to Markdown with structure mirroring and image extraction"
+version = "0.2.0"
+description = "Batch-convert PDFs and office documents to Markdown with structure mirroring, image extraction, and Gemini vision-based slide extraction"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "google-genai>=1.0.0",
     "markitdown[docx,xlsx,pptx]>=0.1.0",
+    "pillow>=10.0.0",
     "pymupdf-layout>=1.27.1",
     "pymupdf4llm>=0.2.9",
+    "python-pptx>=0.6.23",
 ]
 
 [project.scripts]
 pdf-to-md = "pdf_to_md.main:main"
+pdf-to-md-vision = "pdf_to_md.vision_converter:main"
 merge-pdfs = "pdf_to_md.merge_pdfs:main"
 
 [tool.hatch.build.targets.wheel]
