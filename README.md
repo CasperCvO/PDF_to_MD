@@ -12,6 +12,7 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 - **Wikilink header** — each Markdown file starts with `[[OriginalFile.ext]]` for easy back-referencing (e.g. in Obsidian).
 - **PDF page markers** — every PDF page starts with a `<!-- page: N -->` marker (including empty pages) so downstream consumers can trace content back to its source page.
 - **XLSX sheet/cell locators** — `.xlsx` workbooks are converted with openpyxl into `## Sheet: Name` sections with `<!-- sheet: "Name" range: A1:D4 -->` markers and row/column-addressed tables, so every value stays addressable as `Sheet!B7`.
+- **DOCX page markers** *(approximate)* — `.docx` output gets `<!-- page: N -->` markers taken from Word's saved layout (`w:lastRenderedPageBreak`). When the file wasn't last saved by Word (e.g. LibreOffice, Google Docs, python-docx), it falls back to manual page breaks, page-break-before paragraphs, and page-starting section breaks — so positions are approximate. Disable with `docx_page_markers=False` / `--no-docx-page-markers`.
 - **Fallback** — if pymupdf4llm fails for a PDF, plain text is extracted via PyMuPDF.
 - **PDF Merger** — merge multiple PDF files in alphabetical order into a single PDF.
 - **Vision-based slide extraction** *(add-on)* — extract structured Markdown from
@@ -25,7 +26,7 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 | Extension | Type                | Converter             |
 | --------- | ------------------- | --------------------- |
 | `.pdf`    | PDF                 | pymupdf4llm / PyMuPDF |
-| `.docx`   | Word                | markitdown            |
+| `.docx`   | Word                | markitdown (+ page markers) |
 | `.doc`    | Word (legacy)       | markitdown            |
 | `.xlsx`   | Excel               | openpyxl (cell locators) |
 | `.xls`    | Excel (legacy)      | markitdown            |
@@ -87,6 +88,10 @@ convert_pdf(Path("path/to/input.pdf"), Path("path/to/output.md"))
 # 3. Convert a single Office file (.docx, .xlsx, .pptx, etc.)
 convert_office(Path("path/to/presentation.pptx"), Path("path/to/output.md"))
 
+# Disable the approximate page markers for .docx files
+convert_office(Path("notes.docx"), Path("notes.md"), docx_page_markers=False)
+convert_tree("path/to/docs", output_root="out", docx_page_markers=False)
+
 # 4. Merge all PDFs in a folder into one PDF
 merge_pdfs(Path("path/to/pdf_folder"), Path("path/to/merged.pdf"))
 
@@ -133,6 +138,7 @@ python merge_pdfs.py [source_dir] [-o output.pdf]
 
 - **`source_dir`** — Root directory to scan. Defaults to the current directory (`.`) if omitted.
 - **`-o`, `--output-dir`** — Directory where converted Markdown files will be written. Defaults to `<source_dir>/Extracts`.
+- **`--docx-page-markers` / `--no-docx-page-markers`** — Enable/disable approximate `<!-- page: N -->` markers in `.docx` output. Enabled by default.
 
 ### Directory Tree Example
 
@@ -202,6 +208,21 @@ columns are included):
 ## Sheet: Notes
 
 _(empty sheet)_
+```
+
+`.docx` output gets approximate `<!-- page: N -->` markers (Word's saved
+layout when present, else manual/section page breaks):
+
+```markdown
+[[Notes.docx]]
+
+<!-- page: 1 -->
+
+First page text
+
+<!-- page: 2 -->
+
+# Chapter Two
 ```
 
 ## Vision-Based Slide Extraction (Add-on)

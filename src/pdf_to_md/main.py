@@ -16,6 +16,8 @@ Features
 - Extracts embedded images from PDFs into per-document ``<stem>_images/`` folders.
 - Prepends a Wikilink ``[[OriginalFile.ext]]`` at the top of every Markdown
   file for easy back-referencing (e.g. in Obsidian).
+- Adds approximate ``<!-- page: N -->`` markers to ``.docx`` output
+  (disable with ``--no-docx-page-markers``).
 - Automatically skips the output folder to avoid re-processing.
 
 Usage
@@ -53,6 +55,8 @@ def build_output_path(source_root: Path, output_root: Path, file_path: Path) -> 
 def convert_tree(
     source_root: Path | str,
     output_root: Path | str | None = None,
+    *,
+    docx_page_markers: bool = True,
 ) -> dict[str, int]:
     """Recursively convert supported documents in *source_root* to Markdown.
 
@@ -63,6 +67,9 @@ def convert_tree(
     output_root : Path | str | None, optional
         Directory where converted Markdown files will be written. If None,
         defaults to ``<source_root>/Extracts``.
+    docx_page_markers : bool, optional
+        Insert approximate ``<!-- page: N -->`` markers into ``.docx``
+        output (default: True).
 
     Returns
     -------
@@ -105,7 +112,9 @@ def convert_tree(
             elif ext in OFFICE_EXTENSIONS:
                 output_path = build_output_path(source_root, resolved_output_root, file_path)
                 try:
-                    convert_office(file_path, output_path)
+                    convert_office(
+                        file_path, output_path, docx_page_markers=docx_page_markers
+                    )
                     counts["office"] += 1
                 except Exception as exc:
                     LOGGER.error("Failed to convert office file %s: %s", file_path, exc)
@@ -133,6 +142,12 @@ def main() -> None:
         default=None,
         help=f"Output directory (default: <source_dir>/{OUTPUT_DIR_NAME}).",
     )
+    parser.add_argument(
+        "--docx-page-markers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Insert <!-- page: N --> markers into .docx output (default: enabled).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -143,7 +158,11 @@ def main() -> None:
 
     output_root = Path(args.output_dir).resolve() if args.output_dir else None
 
-    counts = convert_tree(source_root, output_root=output_root)
+    counts = convert_tree(
+        source_root,
+        output_root=output_root,
+        docx_page_markers=args.docx_page_markers,
+    )
     total = counts["pdf"] + counts["office"]
     target_output_dir = output_root if output_root else (source_root / OUTPUT_DIR_NAME)
     LOGGER.info(

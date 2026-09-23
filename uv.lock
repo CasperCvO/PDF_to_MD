@@ -690,10 +690,11 @@ wheels = [
 
 [[package]]
 name = "pdf-to-md"
-version = "0.3.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "google-genai" },
+    { name = "lxml" },
     { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
     { name = "openpyxl" },
     { name = "pillow" },
@@ -710,6 +711,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "google-genai", specifier = ">=1.0.0" },
+    { name = "lxml", specifier = ">=5" },
     { name = "markitdown", extras = ["docx", "xlsx", "pptx"], specifier = ">=0.1.0" },
     { name = "openpyxl", specifier = ">=3.1" },
     { name = "pillow", specifier = ">=10.0.0" },
