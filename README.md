@@ -10,6 +10,8 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 - **Table & header preservation** — uses [pymupdf4llm](https://pypi.org/project/pymupdf4llm/) for high-fidelity PDF conversion and [markitdown](https://pypi.org/project/markitdown/) for office documents.
 - **Image extraction** — embedded images from PDFs are saved to per-document `<name>_images/` folders and referenced in the Markdown.
 - **Wikilink header** — each Markdown file starts with `[[OriginalFile.ext]]` for easy back-referencing (e.g. in Obsidian).
+- **PDF page markers** — every PDF page starts with a `<!-- page: N -->` marker (including empty pages) so downstream consumers can trace content back to its source page.
+- **XLSX sheet/cell locators** — `.xlsx` workbooks are converted with openpyxl into `## Sheet: Name` sections with `<!-- sheet: "Name" range: A1:D4 -->` markers and row/column-addressed tables, so every value stays addressable as `Sheet!B7`.
 - **Fallback** — if pymupdf4llm fails for a PDF, plain text is extracted via PyMuPDF.
 - **PDF Merger** — merge multiple PDF files in alphabetical order into a single PDF.
 - **Vision-based slide extraction** *(add-on)* — extract structured Markdown from
@@ -25,7 +27,7 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 | `.pdf`    | PDF                 | pymupdf4llm / PyMuPDF |
 | `.docx`   | Word                | markitdown            |
 | `.doc`    | Word (legacy)       | markitdown            |
-| `.xlsx`   | Excel               | markitdown            |
+| `.xlsx`   | Excel               | openpyxl (cell locators) |
 | `.xls`    | Excel (legacy)      | markitdown            |
 | `.pptx`   | PowerPoint          | markitdown            |
 | `.ppt`    | PowerPoint (legacy) | markitdown            |
@@ -162,6 +164,46 @@ Each generated `.md` file starts with a Wikilink to the original document:
 ...
 ```
 
+PDF output also marks the start of every page with a `<!-- page: N -->`
+comment (empty pages get a marker too, so the page sequence has no gaps):
+
+```markdown
+[[Report.pdf]]
+
+<!-- page: 1 -->
+
+# Report Title
+
+<!-- page: 2 -->
+
+<!-- page: 3 -->
+
+Page-three content
+```
+
+`.xlsx` workbooks produce one `## Sheet: Name` section per worksheet, with a
+sheet/range locator comment and a table whose first column holds the Excel row
+number and whose header holds the column letters (only non-empty rows and
+columns are included):
+
+```markdown
+[[Budget.xlsx]]
+
+## Sheet: Data
+
+<!-- sheet: "Data" range: A1:D4 -->
+
+| Row | A | B | D |
+| --- | --- | --- | --- |
+| 1 | Name | Amount |  |
+| 2 | Alice | 100 |  |
+| 4 | Bob\|Smith | =SUM(B2:B2) | x |
+
+## Sheet: Notes
+
+_(empty sheet)_
+```
+
 ## Vision-Based Slide Extraction (Add-on)
 
 `convert_presentation_vision` / `pdf-to-md-vision` processes presentations and
@@ -260,6 +302,7 @@ PDF_to_MD/
 │       ├── office_converter.py # Single Office conversion (convert_office)
 │       ├── vision_converter.py # Gemini vision slide extraction (convert_presentation_vision)
 │       └── merge_pdfs.py       # PDF merger (merge_pdfs)
+├── tests/                      # pytest suite (PDF page markers, XLSX locators)
 ├── main.py                     # Convenience root launcher
 └── merge_pdfs.py               # Convenience root launcher
 ```

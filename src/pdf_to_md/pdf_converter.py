@@ -2,13 +2,16 @@
 
 Converts a single PDF file to Markdown using pymupdf4llm (with a plain
 PyMuPDF fallback).  Extracted images are saved into a per-document folder.
-Each output file is prepended with a Wikilink to the original PDF.
+Each output file is prepended with a Wikilink to the original PDF, and every
+page starts with a ``<!-- page: N -->`` marker (including empty pages) so
+downstream consumers can locate the source page of any content.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from pathlib import Path
 
 LOGGER = logging.getLogger(__name__)
@@ -65,12 +68,19 @@ def _extract_markdown(pdf_path: Path, image_dir: Path, clean_stem: str) -> str:
             _patch_pymupdf4llm_image_saver()
             image_dir.mkdir(parents=True, exist_ok=True)
             with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
-                return to_markdown(
+                chunks = to_markdown(
                     doc,
                     write_images=True,
                     image_path=str(image_dir),
                     filename=clean_stem,
-                ).strip()
+                    page_chunks=True,
+                )
+            pages = []
+            for index, chunk in enumerate(chunks):
+                meta = chunk.get("metadata") or {}
+                number = meta.get("page_number") or meta.get("page") or index + 1
+                pages.append((number, (chunk.get("text") or "").strip()))
+            return _join_pages(pages)
         except Exception as exc:
             LOGGER.warning(
                 "pymupdf4llm failed for %s (%s). Falling back to PyMuPDF text.",
@@ -79,9 +89,21 @@ def _extract_markdown(pdf_path: Path, image_dir: Path, clean_stem: str) -> str:
             )
 
     with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
-        pages = [page.get_text("text").rstrip() for page in doc]
+        pages = [
+            (index, page.get_text("text").strip())
+            for index, page in enumerate(doc, start=1)
+        ]
 
-    return "\n\n".join(page for page in pages if page).strip()
+    return _join_pages(pages)
+
+
+def _join_pages(pages: Iterable[tuple[int, str]]) -> str:
+    """Join ``(page_number, text)`` pairs into page-marker-delimited Markdown."""
+    blocks = []
+    for number, text in pages:
+        marker = f"<!-- page: {number} -->"
+        blocks.append(f"{marker}\n\n{text}" if text else marker)
+    return "\n\n".join(blocks)
 
 
 def convert_pdf(pdf_path: Path, output_path: Path) -> None:
