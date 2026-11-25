@@ -7,7 +7,14 @@ uses the Gemini API for presentations with embedded UI screenshots, terminal
 dumps, and metric dashboards.
 """
 
-from .main import convert_tree
+from .hybrid_vision import (
+    UnitVisionAssessment,
+    VisionMode,
+    VisionScreenReport,
+    VisionStrategy,
+    screen_document,
+)
+from .main import convert_tree, screen_tree
 from .merge_pdfs import merge_pdfs
 from .office_converter import SUPPORTED_EXTENSIONS as OFFICE_EXTENSIONS
 from .office_converter import convert_office
@@ -20,9 +27,15 @@ __all__ = [
     "convert_pdf",
     "convert_office",
     "convert_presentation_vision",
+    "screen_document",
+    "screen_tree",
     "merge_pdfs",
+    "VisionMode",
+    "VisionStrategy",
+    "VisionScreenReport",
+    "UnitVisionAssessment",
     "PDF_EXTENSIONS",
     "OFFICE_EXTENSIONS",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

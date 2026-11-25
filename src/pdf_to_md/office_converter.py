@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import copy
 import datetime
+import hashlib
 import io
 import logging
 import re
 import zipfile
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -378,19 +380,582 @@ def _extract_markdown(file_path: Path, *, docx_page_markers: bool = True) -> str
     return (result.text_content or "").strip()
 
 
+def _docx_targeted_vision_markdown(
+    file_path: Path,
+    image_dir: Path,
+    clean_stem: str,
+    *,
+    docx_page_markers: bool,
+    api_key: str | None,
+    vision_model: str,
+    concurrency: int,
+    max_retries: int,
+) -> str:
+    """Extract DOCX Markdown with inline contextual vision for substantive images."""
+    from lxml import etree
+
+    from .hybrid_vision import (
+        VisionImageTask,
+        format_vision_block_standalone,
+        format_vision_for_table_cell,
+        image_bytes_have_visual_detail,
+        run_hybrid_vision_tasks,
+    )
+
+    try:
+        from markitdown import MarkItDown, StreamInfo
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency. Install markitdown to enable office-document conversion: "
+            "pip install 'markitdown[docx,xlsx,pptx]'"
+        ) from exc
+
+    r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    a_blip = "{http://schemas.openxmlformats.org/drawingml/2006/main}blip"
+    w_drawing = f"{{{_W_NS}}}drawing"
+    w_tbl_cell = f"{{{_W_NS}}}tc"
+    w_pstyle = f"{{{_W_NS}}}pStyle"
+    wp_extent = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent"
+    emu_per_pt = 12700.0
+
+    raw_bytes = file_path.read_bytes()
+    if docx_page_markers:
+        working_bytes, inserted_pages = _insert_docx_page_tokens(raw_bytes)
+    else:
+        working_bytes, inserted_pages = raw_bytes, 0
+
+    tasks: list[VisionImageTask] = []
+    rel_refs_by_id: dict[str, str] = {}
+
+    with zipfile.ZipFile(io.BytesIO(working_bytes)) as source:
+        try:
+            doc_xml = source.read("word/document.xml")
+        except KeyError:
+            return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+
+        rels_map: dict[str, str] = {}
+        try:
+            rels_root = etree.fromstring(source.read("word/_rels/document.xml.rels"))
+            for rel in rels_root:
+                rid = rel.get("Id")
+                target = rel.get("Target")
+                if rid and target:
+                    norm = target.lstrip("/")
+                    if not norm.startswith("word/"):
+                        norm = f"word/{norm}"
+                    rels_map[rid] = norm
+        except KeyError:
+            pass
+
+        root = etree.fromstring(doc_xml)
+        body = root.find(_W_BODY)
+        if body is None:
+            return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+
+        # Identify repeating media hashes across approximate pages
+        media_cache: dict[str, bytes] = {}
+        page_num = 1
+        hash_pages: Counter[str] = Counter()
+        seen_on_page: set[str] = set()
+        for elem in body.iter():
+            if not isinstance(elem.tag, str) or _has_skipped_ancestor(elem):
+                continue
+            if elem.tag == _W_T and elem.text and _PAGE_TOKEN_NUMBER.search(elem.text):
+                for num_s in _PAGE_TOKEN_NUMBER.findall(elem.text):
+                    page_num = int(num_s)
+                    seen_on_page.clear()
+            elif elem.tag == a_blip:
+                target = rels_map.get(elem.get(f"{{{r_ns}}}embed") or "")
+                if not target:
+                    continue
+                if target not in media_cache:
+                    try:
+                        media_cache[target] = source.read(target)
+                    except KeyError:
+                        media_cache[target] = b""
+                if media_cache[target]:
+                    h = hashlib.sha1(media_cache[target]).hexdigest()
+                    if h not in seen_on_page:
+                        seen_on_page.add(h)
+                        hash_pages[h] += 1
+
+        total_pages = max(1, page_num)
+        rep_hashes = {
+            h
+            for h, cnt in hash_pages.items()
+            if total_pages >= 3 and cnt >= max(3, int(total_pages * 0.40))
+        }
+
+        current_heading = ""
+        cur_page = 1
+        img_idx = 0
+        drawings_to_replace: list[tuple[Any, Any, str]] = []
+
+        for elem in body.iter():
+            if not isinstance(elem.tag, str) or _has_skipped_ancestor(elem):
+                continue
+            if elem.tag == _W_P:
+                p_text = "".join(t.text or "" for t in elem.iter(_W_T))
+                for num_s in _PAGE_TOKEN_NUMBER.findall(p_text):
+                    cur_page = int(num_s)
+                clean_p = _PAGE_TOKEN_INLINE.sub(" ", p_text).strip()
+                ppr = elem.find(_W_PPR)
+                pstyle = ppr.find(w_pstyle) if ppr is not None else None
+                sval = (pstyle.get(_W_VAL) or "").lower() if pstyle is not None else ""
+                if clean_p and ("heading" in sval or "title" in sval):
+                    current_heading = clean_p
+            elif elem.tag == a_blip:
+                target = rels_map.get(elem.get(f"{{{r_ns}}}embed") or "")
+                blob = media_cache.get(target or "", b"")
+                if not blob or hashlib.sha1(blob).hexdigest() in rep_hashes:
+                    continue
+                w_pt, h_pt = 0.0, 0.0
+                drawing_anc = None
+                para_anc = None
+                cell_anc = None
+                for anc in elem.iterancestors():
+                    if drawing_anc is None and anc.tag == w_drawing:
+                        drawing_anc = anc
+                    if para_anc is None and anc.tag == _W_P:
+                        para_anc = anc
+                    if cell_anc is None and anc.tag == w_tbl_cell:
+                        cell_anc = anc
+                    ext_el = anc.find(wp_extent)
+                    if w_pt == 0.0 and ext_el is not None:
+                        try:
+                            w_pt = int(ext_el.get("cx") or 0) / emu_per_pt
+                            h_pt = int(ext_el.get("cy") or 0) / emu_per_pt
+                        except ValueError:
+                            pass
+                has_detail, px_w, px_h, mime = image_bytes_have_visual_detail(blob)
+                if not has_detail:
+                    continue
+                if not (
+                    (w_pt >= 70.0 and h_pt >= 40.0)
+                    or (w_pt == 0.0 and px_w >= 160 and px_h >= 80)
+                ):
+                    continue
+                if drawing_anc is None or para_anc is None:
+                    continue
+
+                img_idx += 1
+                tid = f"PDFTOMDIMG{img_idx}END"
+                ext_out = "jpg" if mime == "image/jpeg" else "png"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"{clean_stem}-img{img_idx:02d}.{ext_out}"
+                out_img_path = image_dir / fname
+                if ext_out == "png" and not target.lower().endswith(".png"):
+                    from PIL import Image
+
+                    with Image.open(io.BytesIO(blob)) as pil_im:
+                        pil_im.convert("RGB").save(out_img_path, format="PNG")
+                    saved_bytes = out_img_path.read_bytes()
+                    mime = "image/png"
+                else:
+                    out_img_path.write_bytes(blob)
+                    saved_bytes = blob
+
+                rel_refs_by_id[tid] = f"{image_dir.name}/{fname}"
+                ctx_container = cell_anc if cell_anc is not None else para_anc
+                surr_raw = "".join(t.text or "" for t in ctx_container.iter(_W_T))
+                surr_clean = _PAGE_TOKEN_INLINE.sub(" ", surr_raw).strip()
+
+                tasks.append(
+                    VisionImageTask(
+                        task_id=tid,
+                        image_bytes=saved_bytes,
+                        mime_type=mime,
+                        document_name=file_path.name,
+                        unit_number=cur_page if docx_page_markers else None,
+                        section_heading=current_heading,
+                        surrounding_text=surr_clean,
+                    )
+                )
+                drawings_to_replace.append((para_anc, drawing_anc, tid))
+
+        if not tasks:
+            return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+
+        for para_anc, drawing_anc, tid in drawings_to_replace:
+            run_parent = drawing_anc.getparent()
+            if run_parent is not None and run_parent.getparent() is para_anc:
+                pos = list(para_anc).index(run_parent)
+                run_parent.remove(drawing_anc)
+                para_anc.insert(pos + 1, _make_page_token_run(f" {tid} "))
+            else:
+                para_anc.append(_make_page_token_run(f" {tid} "))
+
+        mod_xml = etree.tostring(
+            root, xml_declaration=True, encoding="UTF-8", standalone=True
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as target_zf:
+            for info in source.infolist():
+                data = mod_xml if info.filename == "word/document.xml" else source.read(info.filename)
+                target_zf.writestr(info, data)
+        instrumented_bytes = buf.getvalue()
+
+    img_md_map, _ = run_hybrid_vision_tasks(
+        image_tasks=tasks,
+        page_tasks=[],
+        api_key=api_key,
+        model=vision_model,
+        concurrency=concurrency,
+        max_retries=max_retries,
+    )
+
+    converter = MarkItDown()
+    res = converter.convert_stream(
+        io.BytesIO(instrumented_bytes), stream_info=StreamInfo(extension=".docx")
+    )
+    md_text = (res.text_content or "").strip()
+    if docx_page_markers:
+        md_text = _replace_page_tokens(md_text)
+        md_text = f"<!-- page: 1 -->\n\n{md_text}" if md_text else "<!-- page: 1 -->"
+        if md_text.count("<!-- page:") != inserted_pages + 1:
+            LOGGER.warning(
+                "Page markers lost converting %s", file_path
+            )
+
+    # Splice each image reference + vision extraction safely into prose or GFM table rows
+    out_lines: list[str] = []
+    for line in md_text.splitlines():
+        if "PDFTOMDIMG" not in line:
+            out_lines.append(line)
+            continue
+        is_table_row = line.lstrip().startswith("|")
+        updated = line
+        for tid, rel_ref in rel_refs_by_id.items():
+            if tid not in updated:
+                continue
+            v_md = img_md_map.get(tid, "")
+            if is_table_row:
+                cell_parts = [
+                    p.replace("|", "\\|")
+                    for p in format_vision_for_table_cell(rel_ref, v_md)
+                ]
+                updated = updated.replace(tid, "<br>".join(cell_parts))
+            else:
+                block = format_vision_block_standalone(rel_ref, v_md)
+                updated = updated.replace(tid, f"\n\n{block}\n\n")
+        out_lines.append(updated)
+
+    joined = "\n".join(out_lines)
+    joined = re.sub(r"\n{3,}", "\n\n", joined).strip()
+    return joined
+
+
+def _pptx_targeted_vision_markdown(
+    file_path: Path,
+    image_dir: Path,
+    clean_stem: str,
+    *,
+    api_key: str | None,
+    vision_model: str,
+    concurrency: int,
+    max_retries: int,
+) -> str:
+    """Extract PPTX slides into one Markdown file with contextual vision on pictures."""
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+    from .hybrid_vision import (
+        VisionImageTask,
+        _iter_pptx_shapes,
+        format_vision_block_standalone,
+        image_bytes_have_visual_detail,
+        run_hybrid_vision_tasks,
+    )
+
+    emu_per_pt = 12700.0
+    prs = Presentation(str(file_path))
+    total_slides = len(prs.slides)
+    if total_slides == 0:
+        return ""
+
+    sha_slides: Counter[str] = Counter()
+    for slide in prs.slides:
+        seen_sha: set[str] = set()
+        for shape in _iter_pptx_shapes(slide.shapes):
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    seen_sha.add(shape.image.sha1)
+                except Exception:
+                    continue
+        for s in seen_sha:
+            sha_slides[s] += 1
+
+    rep_shas = {
+        s
+        for s, cnt in sha_slides.items()
+        if total_slides >= 3 and cnt >= max(3, int(total_slides * 0.40))
+    }
+
+    tasks: list[VisionImageTask] = []
+    slide_entries: list[tuple[int, list[tuple[str, str]]]] = []
+
+    for s_idx, slide in enumerate(prs.slides, start=1):
+        items: list[tuple[str, str]] = []
+        slide_title = ""
+        if getattr(slide.shapes, "title", None) is not None and slide.shapes.title.text:
+            slide_title = slide.shapes.title.text.strip()
+
+        slide_text_parts: list[str] = []
+        pic_counter = 0
+
+        for shape in _iter_pptx_shapes(slide.shapes):
+            if getattr(shape, "has_text_frame", False):
+                is_title_shape = (
+                    getattr(slide.shapes, "title", None) is not None
+                    and shape == slide.shapes.title
+                )
+                for para in shape.text_frame.paragraphs:
+                    txt = para.text.strip()
+                    if not txt:
+                        continue
+                    slide_text_parts.append(txt)
+                    if is_title_shape:
+                        items.append(("text", f"## {txt}"))
+                        is_title_shape = False
+                    else:
+                        items.append(("text", txt))
+            elif getattr(shape, "has_table", False):
+                rows = [
+                    [cell.text.strip().replace("\n", "<br>").replace("|", "\\|") for cell in r.cells]
+                    for r in shape.table.rows
+                ]
+                if rows:
+                    hdr = "| " + " | ".join(rows[0]) + " |"
+                    sep = "| " + " | ".join("---" for _ in rows[0]) + " |"
+                    body = ["| " + " | ".join(r) + " |" for r in rows[1:]]
+                    tbl_md = "\n".join([hdr, sep, *body])
+                    items.append(("text", tbl_md))
+                    slide_text_parts.append(tbl_md)
+            elif shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                w_pt = float(shape.width or 0) / emu_per_pt
+                h_pt = float(shape.height or 0) / emu_per_pt
+                if w_pt < 70.0 or h_pt < 40.0:
+                    continue
+                try:
+                    sha = shape.image.sha1
+                    blob = shape.image.blob
+                except Exception:
+                    continue
+                if sha in rep_shas:
+                    continue
+                has_detail, _, _, mime = image_bytes_have_visual_detail(blob)
+                if not has_detail:
+                    continue
+
+                pic_counter += 1
+                ext_out = "jpg" if mime == "image/jpeg" else "png"
+                image_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"{clean_stem}-s{s_idx:03d}-img{pic_counter:02d}.{ext_out}"
+                out_file = image_dir / fname
+                if ext_out == "png" and mime != "image/png":
+                    from PIL import Image
+
+                    with Image.open(io.BytesIO(blob)) as pil_im:
+                        pil_im.convert("RGB").save(out_file, format="PNG")
+                    saved_bytes = out_file.read_bytes()
+                    mime = "image/png"
+                else:
+                    out_file.write_bytes(blob)
+                    saved_bytes = blob
+
+                tid = f"s{s_idx}-p{pic_counter}"
+                rel_ref = f"{image_dir.name}/{fname}"
+                items.append(("img", f"{tid}|{rel_ref}"))
+                tasks.append(
+                    VisionImageTask(
+                        task_id=tid,
+                        image_bytes=saved_bytes,
+                        mime_type=mime,
+                        document_name=file_path.name,
+                        unit_number=s_idx,
+                        section_heading=slide_title,
+                        surrounding_text="\n".join(slide_text_parts),
+                    )
+                )
+
+        # Backfill full slide text context onto tasks created earlier on the same slide
+        full_slide_ctx = "\n".join(slide_text_parts)
+        for idx_t in range(len(tasks) - pic_counter, len(tasks)):
+            t = tasks[idx_t]
+            tasks[idx_t] = VisionImageTask(
+                task_id=t.task_id,
+                image_bytes=t.image_bytes,
+                mime_type=t.mime_type,
+                document_name=t.document_name,
+                unit_number=t.unit_number,
+                section_heading=t.section_heading,
+                surrounding_text=full_slide_ctx,
+            )
+
+        slide_entries.append((s_idx, items))
+
+    img_md_map, _ = run_hybrid_vision_tasks(
+        image_tasks=tasks,
+        page_tasks=[],
+        api_key=api_key,
+        model=vision_model,
+        concurrency=concurrency,
+        max_retries=max_retries,
+    )
+
+    slide_blocks: list[str] = []
+    for s_idx, items in slide_entries:
+        chunks: list[str] = []
+        for kind, val in items:
+            if kind == "text":
+                chunks.append(val)
+            else:
+                tid, rel_ref = val.split("|", 1)
+                chunks.append(
+                    format_vision_block_standalone(rel_ref, img_md_map.get(tid, ""))
+                )
+        body = "\n\n".join(c for c in chunks if c.strip())
+        marker = f"<!-- page: {s_idx} -->"
+        slide_blocks.append(f"{marker}\n\n{body}" if body else marker)
+
+    return "\n\n".join(slide_blocks)
+
+
+def _extract_markdown_with_vision(
+    file_path: Path,
+    output_path: Path,
+    *,
+    docx_page_markers: bool,
+    vision_mode: str,
+    api_key: str | None,
+    vision_model: str | None,
+    low_threshold: float,
+    high_threshold: float,
+    dpi: int,
+    concurrency: int,
+    max_retries: int,
+) -> str:
+    from .hybrid_vision import (
+        DEFAULT_MODEL,
+        libreoffice_to_pdf,
+        resolve_effective_strategy,
+        screen_document,
+        validate_vision_options,
+    )
+    from .pdf_converter import _extract_markdown as _extract_pdf_markdown
+
+    validate_vision_options(
+        vision_mode, low_threshold, high_threshold, dpi, concurrency, max_retries
+    )
+    effective_model = vision_model or DEFAULT_MODEL
+    suffix = file_path.suffix.lower()
+    if suffix not in (".docx", ".pptx"):
+        return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+
+    report = screen_document(
+        file_path, low_threshold=low_threshold, high_threshold=high_threshold
+    )
+    strategy = resolve_effective_strategy(report, vision_mode)  # type: ignore[arg-type]
+    LOGGER.info(
+        "Screened %s: %d/%d unit(s) visual (%.0f%%) -> strategy=%s",
+        file_path.name,
+        report.candidate_units,
+        report.total_units,
+        report.vision_ratio * 100.0,
+        strategy,
+    )
+    if strategy == "none":
+        return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+
+    clean_stem = re.sub(r"[\s\(\)\[\]]+", "_", file_path.stem).strip("_") or "document"
+    image_dir = output_path.parent / f"{clean_stem}_images"
+
+    if strategy in ("hybrid_pages", "full_document"):
+        forced_pdf_mode = "pages" if strategy == "hybrid_pages" else "full"
+        try:
+            with libreoffice_to_pdf(file_path) as tmp_pdf:
+                pdf_md = _extract_pdf_markdown(
+                    tmp_pdf,
+                    image_dir,
+                    clean_stem,
+                    vision_mode=forced_pdf_mode,
+                    api_key=api_key,
+                    vision_model=effective_model,
+                    low_threshold=low_threshold,
+                    high_threshold=high_threshold,
+                    dpi=dpi,
+                    concurrency=concurrency,
+                    max_retries=max_retries,
+                )
+            if suffix == ".docx" and not docx_page_markers:
+                pdf_md = re.sub(r"<!-- page: \d+ -->\n*", "", pdf_md).strip()
+            return pdf_md
+        except FileNotFoundError:
+            LOGGER.info(
+                "LibreOffice not found; falling back to embedded-image vision for %s.",
+                file_path.name,
+            )
+
+    if suffix == ".docx":
+        return _docx_targeted_vision_markdown(
+            file_path,
+            image_dir,
+            clean_stem,
+            docx_page_markers=docx_page_markers,
+            api_key=api_key,
+            vision_model=effective_model,
+            concurrency=concurrency,
+            max_retries=max_retries,
+        )
+
+    return _pptx_targeted_vision_markdown(
+        file_path,
+        image_dir,
+        clean_stem,
+        api_key=api_key,
+        vision_model=effective_model,
+        concurrency=concurrency,
+        max_retries=max_retries,
+    )
+
+
 def convert_office(
     file_path: Path,
     output_path: Path,
     *,
     docx_page_markers: bool = True,
+    vision_mode: str = "off",
+    api_key: str | None = None,
+    vision_model: str | None = None,
+    low_threshold: float = 0.30,
+    high_threshold: float = 0.70,
+    dpi: int = 200,
+    concurrency: int = 4,
+    max_retries: int = 5,
 ) -> None:
     """Convert a single office document to Markdown and write to *output_path*.
 
     When *docx_page_markers* is true, ``.docx`` output gets approximate
-    ``<!-- page: N -->`` markers (Word's saved layout breaks when present,
-    else manual/page-break-before/section breaks).
+    ``<!-- page: N -->`` markers.  When *vision_mode* is not ``"off"``,
+    ``.docx`` and ``.pptx`` documents are screened and augmented with Gemini
+    vision in a single unified Markdown file.
     """
-    markdown_body = _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+    if vision_mode == "off":
+        markdown_body = _extract_markdown(file_path, docx_page_markers=docx_page_markers)
+    else:
+        markdown_body = _extract_markdown_with_vision(
+            file_path,
+            output_path,
+            docx_page_markers=docx_page_markers,
+            vision_mode=vision_mode,
+            api_key=api_key,
+            vision_model=vision_model,
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
+            dpi=dpi,
+            concurrency=concurrency,
+            max_retries=max_retries,
+        )
     wikilink = f"[[{file_path.name}]]"
     content = f"{wikilink}\n\n{markdown_body}\n" if markdown_body else f"{wikilink}\n"
 

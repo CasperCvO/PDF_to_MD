@@ -7,8 +7,13 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 - **Recursive scanning** — walks all directories and subdirectories of a source folder.
 - **Customizable output** — outputs mirror the source directory layout into a specified directory (defaults to `Extracts/`).
 - **Multi-format support** — converts PDFs, Word documents, Excel spreadsheets, and PowerPoint presentations.
-- **Table & header preservation** — uses [pymupdf4llm](https://pypi.org/project/pymupdf4llm/) for high-fidelity PDF conversion and [markitdown](https://pypi.org/project/markitdown/) for office documents.
-- **Image extraction** — embedded images from PDFs are saved to per-document `<name>_images/` folders and referenced in the Markdown.
+- **Table, heading & list preservation** — geometry-driven PyMuPDF extraction for PDFs (multi-page split tables, stub vs. top-header tables, relative heading hierarchy, nested vector/Unicode bullet lists, two-column prose, inline hyperlinks) and [markitdown](https://pypi.org/project/markitdown/) / `openpyxl` for office documents.
+- **Image extraction** — embedded raster images and genuine vector diagrams from PDFs are saved lazily to per-document `<name>_images/` folders using portable relative paths.
+- **Hybrid vision screening & tandem extraction** *(optional, `--vision`)* — screens each PDF, `.docx`, or `.pptx` to measure visual page density (filtering out repeating header/footer logos and solid spacers) and routes automatically while keeping output as **one unified `.md` file** with `<!-- page: N -->` markers:
+  - `0%` visual pages → pure local extraction (`0` API calls).
+  - `<= 30%` visual pages (`--vision-low-threshold`) → **targeted image-in-context** vision: local extraction handles the document while only substantive images/diagrams are sent to Gemini alongside surrounding section/paragraph/table context and spliced inline.
+  - `30%–70%` visual pages → **hybrid page-level** vision: native text pages stay local; visual candidate pages use full-page vision anchored by the native text layer.
+  - `> 70%` visual pages (`--vision-high-threshold`) → **full-document** vision anchored by native text, merged into one `.md` file.
 - **Wikilink header** — each Markdown file starts with `[[OriginalFile.ext]]` for easy back-referencing (e.g. in Obsidian).
 - **PDF page markers** — every PDF page starts with a `<!-- page: N -->` marker (including empty pages) so downstream consumers can trace content back to its source page.
 - **XLSX sheet/cell locators** — `.xlsx` workbooks are converted with openpyxl into `## Sheet: Name` sections with `<!-- sheet: "Name" range: A1:D4 -->` markers and row/column-addressed tables, so every value stays addressable as `Sheet!B7`.
@@ -75,24 +80,46 @@ Import functions directly into your Python code:
 
 ```python
 from pathlib import Path
-from pdf_to_md import convert_tree, convert_pdf, convert_office, merge_pdfs
+from pdf_to_md import (
+    convert_tree,
+    convert_pdf,
+    convert_office,
+    screen_document,
+    screen_tree,
+    merge_pdfs,
+)
 
-# 1. Batch convert an entire directory tree
+# 1. Batch convert an entire directory tree (local deterministic extraction)
 # Output defaults to <source_dir>/Extracts if output_root is omitted
 counts = convert_tree("path/to/docs", output_root="path/to/output_markdown")
 print(counts)  # e.g. {'pdf': 5, 'office': 2, 'skipped': 0}
 
-# 2. Convert a single PDF file
-convert_pdf(Path("path/to/input.pdf"), Path("path/to/output.md"))
+# 2. Screen a document (or tree) to see if/how vision extraction applies
+report = screen_document("path/to/architecture.pdf")
+print(report.vision_ratio, report.recommended_strategy, report.candidate_unit_numbers)
+# e.g. 0.03125 'targeted' [24]
 
-# 3. Convert a single Office file (.docx, .xlsx, .pptx, etc.)
+# 3. Hybrid local + Gemini vision conversion (remains a single unified .md file)
+convert_pdf(
+    Path("path/to/architecture.pdf"),
+    Path("path/to/architecture.md"),
+    vision_mode="auto",        # "off" (default) | "auto" | "images" | "pages" | "full"
+    low_threshold=0.30,        # <= 30%: targeted image + context extraction
+    high_threshold=0.70,       # > 70%: full-document vision; 30-70%: hybrid pages
+    api_key="YOUR_GEMINI_KEY", # or set GEMINI_API_KEY / .env (not needed if 0% visual)
+)
+
+convert_tree("path/to/docs", output_root="out", vision_mode="auto")
+
+# 4. Convert a single Office file (.docx, .xlsx, .pptx, etc.)
 convert_office(Path("path/to/presentation.pptx"), Path("path/to/output.md"))
+convert_office(Path("path/to/spec.docx"), Path("path/to/spec.md"), vision_mode="auto")
 
 # Disable the approximate page markers for .docx files
 convert_office(Path("notes.docx"), Path("notes.md"), docx_page_markers=False)
 convert_tree("path/to/docs", output_root="out", docx_page_markers=False)
 
-# 4. Merge all PDFs in a folder into one PDF
+# 5. Merge all PDFs in a folder into one PDF
 merge_pdfs(Path("path/to/pdf_folder"), Path("path/to/merged.pdf"))
 
 # 5. Vision-based slide extraction (Gemini API; add-on, does not affect 1-4)
@@ -117,13 +144,20 @@ print(written)  # per-slide .md files and/or a unified .json
 When installed as a package, CLI commands are available directly:
 
 ```bash
-# Batch convert documents
-pdf-to-md [source_dir] [-o output_dir]
+# Batch convert documents (pure local)
+pdf-to-md [source_dir_or_file] [-o output_dir]
+
+# Screen documents for visual density without converting or calling the API
+pdf-to-md [source_dir_or_file] --screen-only
+
+# Hybrid local + vision extraction into single unified .md files
+pdf-to-md [source_dir_or_file] --vision [-o output_dir]
+pdf-to-md [source_dir_or_file] --vision-mode auto --vision-low-threshold 0.30 --vision-high-threshold 0.70
 
 # Merge PDFs
 merge-pdfs [source_dir] [-o output.pdf]
 
-# Vision-based slide extraction (see section below for all options)
+# Per-slide vision extraction add-on (one .md per slide + YAML frontmatter)
 pdf-to-md-vision --input-path slides.pdf --output-dir out --export-format both
 ```
 
@@ -136,9 +170,14 @@ python merge_pdfs.py [source_dir] [-o output.pdf]
 
 ### Options
 
-- **`source_dir`** — Root directory to scan. Defaults to the current directory (`.`) if omitted.
+- **`source_dir`** — Root directory (or single file) to scan. Defaults to the current directory (`.`) if omitted.
 - **`-o`, `--output-dir`** — Directory where converted Markdown files will be written. Defaults to `<source_dir>/Extracts`.
 - **`--docx-page-markers` / `--no-docx-page-markers`** — Enable/disable approximate `<!-- page: N -->` markers in `.docx` output. Enabled by default.
+- **`--vision`** — Shorthand for `--vision-mode auto` (hybrid screening + Gemini vision while keeping one `.md` file per source document).
+- **`--vision-mode {off,auto,images,pages,full}`** — Vision strategy (`off` by default).
+- **`--vision-low-threshold FLOAT`** / **`--vision-high-threshold FLOAT`** — Visual page ratio boundaries for `auto` routing (`0.30` and `0.70` by default).
+- **`--screen-only`** — Screen supported files and log each document's visual page ratio and recommended strategy without writing files or calling the API.
+- **`--api-key`**, **`--vision-model`**, **`--vision-dpi`**, **`--vision-concurrency`**, **`--vision-max-retries`** — Gemini API configuration for hybrid vision runs.
 
 ### Directory Tree Example
 
@@ -317,11 +356,12 @@ PDF_to_MD/
 ├── pyproject.toml              # Build backend, package metadata & CLI entry points
 ├── src/
 │   └── pdf_to_md/
-│       ├── __init__.py         # Package exports (convert_tree, convert_pdf, etc.)
-│       ├── main.py             # CLI and directory batch conversion (convert_tree)
+│       ├── __init__.py         # Package exports (convert_tree, convert_pdf, screen_document, etc.)
+│       ├── main.py             # CLI and directory batch conversion (convert_tree, screen_tree)
 │       ├── pdf_converter.py    # Single PDF conversion (convert_pdf)
 │       ├── office_converter.py # Single Office conversion (convert_office)
-│       ├── vision_converter.py # Gemini vision slide extraction (convert_presentation_vision)
+│       ├── hybrid_vision.py    # Document vision screening & single-file hybrid orchestration
+│       ├── vision_converter.py # Per-slide Gemini vision extraction (convert_presentation_vision)
 │       └── merge_pdfs.py       # PDF merger (merge_pdfs)
 ├── tests/                      # pytest suite (PDF page markers, XLSX locators)
 ├── main.py                     # Convenience root launcher
