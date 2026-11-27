@@ -29,6 +29,14 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from .hybrid_vision import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_HIGH_THRESHOLD,
+    DEFAULT_HYBRID_DPI,
+    DEFAULT_LOW_THRESHOLD,
+    DEFAULT_MAX_RETRIES,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -388,6 +396,7 @@ def _docx_targeted_vision_markdown(
     docx_page_markers: bool,
     api_key: str | None,
     vision_model: str,
+    thinking_level: str | None = None,
     concurrency: int,
     max_retries: int,
 ) -> str:
@@ -600,6 +609,7 @@ def _docx_targeted_vision_markdown(
         page_tasks=[],
         api_key=api_key,
         model=vision_model,
+        thinking_level=thinking_level,
         concurrency=concurrency,
         max_retries=max_retries,
     )
@@ -652,6 +662,7 @@ def _pptx_targeted_vision_markdown(
     *,
     api_key: str | None,
     vision_model: str,
+    thinking_level: str | None = None,
     concurrency: int,
     max_retries: int,
 ) -> str:
@@ -752,7 +763,7 @@ def _pptx_targeted_vision_markdown(
                 image_dir.mkdir(parents=True, exist_ok=True)
                 fname = f"{clean_stem}-s{s_idx:03d}-img{pic_counter:02d}.{ext_out}"
                 out_file = image_dir / fname
-                if ext_out == "png" and mime != "image/png":
+                if ext_out == "png" and not blob.startswith(b"\x89PNG\r\n\x1a\n"):
                     from PIL import Image
 
                     with Image.open(io.BytesIO(blob)) as pil_im:
@@ -799,6 +810,7 @@ def _pptx_targeted_vision_markdown(
         page_tasks=[],
         api_key=api_key,
         model=vision_model,
+        thinking_level=thinking_level,
         concurrency=concurrency,
         max_retries=max_retries,
     )
@@ -829,6 +841,7 @@ def _extract_markdown_with_vision(
     vision_mode: str,
     api_key: str | None,
     vision_model: str | None,
+    thinking_level: str | None = None,
     low_threshold: float,
     high_threshold: float,
     dpi: int,
@@ -845,9 +858,16 @@ def _extract_markdown_with_vision(
     from .pdf_converter import _extract_markdown as _extract_pdf_markdown
 
     validate_vision_options(
-        vision_mode, low_threshold, high_threshold, dpi, concurrency, max_retries
+        vision_mode,
+        low_threshold,
+        high_threshold,
+        dpi,
+        concurrency,
+        max_retries,
+        vision_model=vision_model,
+        thinking_level=thinking_level,
     )
-    effective_model = vision_model or DEFAULT_MODEL
+    effective_model = (vision_model or "").strip() or DEFAULT_MODEL
     suffix = file_path.suffix.lower()
     if suffix not in (".docx", ".pptx"):
         return _extract_markdown(file_path, docx_page_markers=docx_page_markers)
@@ -881,6 +901,7 @@ def _extract_markdown_with_vision(
                     vision_mode=forced_pdf_mode,
                     api_key=api_key,
                     vision_model=effective_model,
+                    thinking_level=thinking_level,
                     low_threshold=low_threshold,
                     high_threshold=high_threshold,
                     dpi=dpi,
@@ -904,6 +925,7 @@ def _extract_markdown_with_vision(
             docx_page_markers=docx_page_markers,
             api_key=api_key,
             vision_model=effective_model,
+            thinking_level=thinking_level,
             concurrency=concurrency,
             max_retries=max_retries,
         )
@@ -914,6 +936,7 @@ def _extract_markdown_with_vision(
         clean_stem,
         api_key=api_key,
         vision_model=effective_model,
+        thinking_level=thinking_level,
         concurrency=concurrency,
         max_retries=max_retries,
     )
@@ -927,11 +950,12 @@ def convert_office(
     vision_mode: str = "off",
     api_key: str | None = None,
     vision_model: str | None = None,
-    low_threshold: float = 0.30,
-    high_threshold: float = 0.70,
-    dpi: int = 200,
-    concurrency: int = 4,
-    max_retries: int = 5,
+    thinking_level: str | None = None,
+    low_threshold: float = DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = DEFAULT_HIGH_THRESHOLD,
+    dpi: int = DEFAULT_HYBRID_DPI,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> None:
     """Convert a single office document to Markdown and write to *output_path*.
 
@@ -950,6 +974,7 @@ def convert_office(
             vision_mode=vision_mode,
             api_key=api_key,
             vision_model=vision_model,
+            thinking_level=thinking_level,
             low_threshold=low_threshold,
             high_threshold=high_threshold,
             dpi=dpi,

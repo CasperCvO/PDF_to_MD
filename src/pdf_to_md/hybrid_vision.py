@@ -40,12 +40,16 @@ from .vision_converter import (
     DEFAULT_CONCURRENCY,
     DEFAULT_MAX_RETRIES,
     DEFAULT_MODEL,
+    VALID_THINKING_LEVELS,
+    ThinkingLevel,
+    _build_generate_config,
     _create_async_client,
     _describe_error,
     _find_soffice,
     _InvalidModelOutput,
     _is_retryable,
     _normalize_image_bytes,
+    _normalize_thinking_level,
     _parse_model_json,
     _resolve_api_key,
 )
@@ -191,6 +195,8 @@ def validate_vision_options(
     dpi: int = DEFAULT_HYBRID_DPI,
     concurrency: int = DEFAULT_CONCURRENCY,
     max_retries: int = DEFAULT_MAX_RETRIES,
+    vision_model: str | None = None,
+    thinking_level: str | None = None,
 ) -> None:
     if vision_mode not in VALID_VISION_MODES:
         raise ValueError(
@@ -210,6 +216,9 @@ def validate_vision_options(
         raise ValueError(f"concurrency must be >= 1 (got {concurrency})")
     if max_retries < 0:
         raise ValueError(f"max_retries must be >= 0 (got {max_retries})")
+    if vision_model is not None and not vision_model.strip():
+        raise ValueError("vision_model must not be empty")
+    _normalize_thinking_level(thinking_level)
 
 
 def choose_strategy_from_ratio(
@@ -590,7 +599,6 @@ def screen_docx_path(
     from .office_converter import (
         _SKIPPED_ANCESTORS,
         _W_BODY,
-        _W_P,
         _W_T,
         _docx_page_break_candidates,
     )
@@ -685,8 +693,6 @@ def screen_docx_path(
                             pass
                         break
                 page_blips[page_num].append((target, w_pt, h_pt))
-                if elem.tag == _W_P:
-                    pass
 
         for p, blips in page_blips.items():
             seen_h: set[str] = set()
@@ -890,6 +896,7 @@ def run_hybrid_vision_tasks(
     page_tasks: list[VisionPageTask],
     api_key: str | None,
     model: str = DEFAULT_MODEL,
+    thinking_level: str | None = None,
     concurrency: int = DEFAULT_CONCURRENCY,
     max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> tuple[dict[str, str], dict[int, str]]:
@@ -897,6 +904,7 @@ def run_hybrid_vision_tasks(
 
     Returns ``(image_markdown_by_task_id, page_markdown_by_unit_number)``.
     """
+    normalized_thinking = _normalize_thinking_level(thinking_level)
     if not image_tasks and not page_tasks:
         return {}, {}
 
@@ -913,6 +921,7 @@ def run_hybrid_vision_tasks(
             page_tasks=page_tasks,
             api_key=resolved_key,
             model=model,
+            thinking_level=normalized_thinking,
             concurrency=concurrency,
             max_retries=max_retries,
         )
@@ -925,6 +934,7 @@ async def _run_tasks_async(
     page_tasks: list[VisionPageTask],
     api_key: str,
     model: str,
+    thinking_level: str | None = None,
     concurrency: int,
     max_retries: int,
 ) -> tuple[dict[str, str], dict[int, str]]:
@@ -936,7 +946,9 @@ async def _run_tasks_async(
             md = await _call_with_retry(
                 label=f"image {task.task_id}",
                 max_retries=max_retries,
-                coro_factory=lambda: _extract_image_in_context_once(client, model, task),
+                coro_factory=lambda: _extract_image_in_context_once(
+                    client, model, task, thinking_level=thinking_level
+                ),
             )
             return task.task_id, md
 
@@ -945,7 +957,9 @@ async def _run_tasks_async(
             md = await _call_with_retry(
                 label=f"page {task.unit_number}",
                 max_retries=max_retries,
-                coro_factory=lambda: _extract_full_page_once(client, model, task),
+                coro_factory=lambda: _extract_full_page_once(
+                    client, model, task, thinking_level=thinking_level
+                ),
             )
             return task.unit_number, md
 
@@ -999,6 +1013,8 @@ async def _extract_image_in_context_once(
     client,
     model: str,
     task: VisionImageTask,
+    *,
+    thinking_level: str | None = None,
 ) -> str:
     ctx_lines = [f"Document: {task.document_name}"]
     if task.unit_number is not None:
@@ -1028,7 +1044,7 @@ async def _extract_image_in_context_once(
         client.models.generate_content(
             model=model,
             contents=contents,
-            config={"response_mime_type": "application/json"},
+            config=_build_generate_config(thinking_level),
         ),
         timeout=180,
     )
@@ -1048,6 +1064,8 @@ async def _extract_full_page_once(
     client,
     model: str,
     task: VisionPageTask,
+    *,
+    thinking_level: str | None = None,
 ) -> str:
     ctx_lines = [
         f"Document: {task.document_name}",
@@ -1079,7 +1097,7 @@ async def _extract_full_page_once(
         client.models.generate_content(
             model=model,
             contents=contents,
-            config={"response_mime_type": "application/json"},
+            config=_build_generate_config(thinking_level),
         ),
         timeout=180,
     )

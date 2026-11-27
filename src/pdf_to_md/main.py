@@ -7,7 +7,7 @@ original directory structure.
 
 Supported formats
 -----------------
-- **PDF** — via pymupdf4llm (with a plain PyMuPDF fallback).
+- **PDF** — via PyMuPDF geometry-driven extraction (with a plain PyMuPDF text fallback).
 - **Office** — .docx, .doc, .xlsx, .xls, .pptx, .ppt via markitdown.
 
 Features
@@ -48,7 +48,12 @@ from .office_converter import SUPPORTED_EXTENSIONS as OFFICE_EXTENSIONS
 from .office_converter import convert_office
 from .pdf_converter import SUPPORTED_EXTENSIONS as PDF_EXTENSIONS
 from .pdf_converter import convert_pdf
-from .vision_converter import DEFAULT_CONCURRENCY, DEFAULT_MAX_RETRIES, DEFAULT_MODEL
+from .vision_converter import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_MODEL,
+    VALID_THINKING_LEVELS,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -111,6 +116,7 @@ def convert_tree(
     vision_mode: str = "off",
     api_key: str | None = None,
     vision_model: str | None = None,
+    thinking_level: str | None = None,
     low_threshold: float = DEFAULT_LOW_THRESHOLD,
     high_threshold: float = DEFAULT_HIGH_THRESHOLD,
     dpi: int = DEFAULT_HYBRID_DPI,
@@ -141,7 +147,14 @@ def convert_tree(
     """
     if vision_mode != "off":
         validate_vision_options(
-            vision_mode, low_threshold, high_threshold, dpi, concurrency, max_retries
+            vision_mode,
+            low_threshold,
+            high_threshold,
+            dpi,
+            concurrency,
+            max_retries,
+            vision_model=vision_model,
+            thinking_level=thinking_level,
         )
 
     source_root = Path(source_root).resolve()
@@ -163,6 +176,7 @@ def convert_tree(
             "vision_mode": vision_mode,
             "api_key": api_key,
             "vision_model": vision_model,
+            "thinking_level": thinking_level,
             "low_threshold": low_threshold,
             "high_threshold": high_threshold,
             "dpi": dpi,
@@ -274,6 +288,17 @@ def main() -> None:
         help=f"Gemini model id for vision extraction (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
+        "--vision-thinking-level",
+        type=str.lower,
+        choices=list(VALID_THINKING_LEVELS),
+        default=None,
+        help=(
+            "Gemini thinking level for vision extraction: minimal, low, medium, "
+            "high, or xhigh (default: model default; gemini-4-hydrogen supports "
+            "low/medium/high/xhigh)."
+        ),
+    )
+    parser.add_argument(
         "--vision-dpi",
         type=int,
         default=DEFAULT_HYBRID_DPI,
@@ -300,7 +325,7 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    for noisy_logger in ("httpx", "httpcore"):
+    for noisy_logger in ("httpx", "httpx2", "httpcore", "httpcore2"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     logging.getLogger("google_genai").setLevel(logging.ERROR)
 
@@ -344,6 +369,7 @@ def main() -> None:
                 "vision_mode": effective_vision_mode,
                 "api_key": args.api_key,
                 "vision_model": args.vision_model,
+                "thinking_level": args.vision_thinking_level,
                 "low_threshold": args.vision_low_threshold,
                 "high_threshold": args.vision_high_threshold,
                 "dpi": args.vision_dpi,
@@ -381,6 +407,7 @@ def main() -> None:
             vision_mode=effective_vision_mode,
             api_key=args.api_key,
             vision_model=args.vision_model,
+            thinking_level=args.vision_thinking_level,
             low_threshold=args.vision_low_threshold,
             high_threshold=args.vision_high_threshold,
             dpi=args.vision_dpi,

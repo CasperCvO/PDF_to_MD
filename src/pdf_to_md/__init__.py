@@ -20,7 +20,7 @@ from .office_converter import SUPPORTED_EXTENSIONS as OFFICE_EXTENSIONS
 from .office_converter import convert_office
 from .pdf_converter import SUPPORTED_EXTENSIONS as PDF_EXTENSIONS
 from .pdf_converter import convert_pdf
-from .vision_converter import convert_presentation_vision
+from .vision_converter import DEFAULT_MODEL, ThinkingLevel, convert_presentation_vision
 
 __all__ = [
     "convert_tree",
@@ -30,6 +30,8 @@ __all__ = [
     "screen_document",
     "screen_tree",
     "merge_pdfs",
+    "DEFAULT_MODEL",
+    "ThinkingLevel",
     "VisionMode",
     "VisionStrategy",
     "VisionScreenReport",
@@ -38,4 +40,4 @@ __all__ = [
     "OFFICE_EXTENSIONS",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"

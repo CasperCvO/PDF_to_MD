@@ -23,6 +23,14 @@ from pathlib import Path
 from statistics import median
 from typing import Literal
 
+from .hybrid_vision import (
+    DEFAULT_CONCURRENCY,
+    DEFAULT_HIGH_THRESHOLD,
+    DEFAULT_HYBRID_DPI,
+    DEFAULT_LOW_THRESHOLD,
+    DEFAULT_MAX_RETRIES,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS: set[str] = {".pdf"}
@@ -1895,11 +1903,12 @@ def _extract_structured_pages(
     vision_mode: str = "off",
     api_key: str | None = None,
     vision_model: str | None = None,
-    low_threshold: float = 0.30,
-    high_threshold: float = 0.70,
-    dpi: int = 200,
-    concurrency: int = 4,
-    max_retries: int = 5,
+    thinking_level: str | None = None,
+    low_threshold: float = DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = DEFAULT_HIGH_THRESHOLD,
+    dpi: int = DEFAULT_HYBRID_DPI,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> list[tuple[int, str]]:
     per_page_spans: list[list[_SpanItem]] = []
     per_page_drawings: list[_PageDrawings] = []
@@ -2028,7 +2037,7 @@ def _extract_structured_pages(
             strategy,
         )
 
-        effective_model = vision_model or DEFAULT_MODEL
+        effective_model = (vision_model or "").strip() or DEFAULT_MODEL
         if strategy == "targeted":
             image_tasks: list[VisionImageTask] = []
             page_tasks: list[VisionPageTask] = []
@@ -2112,6 +2121,7 @@ def _extract_structured_pages(
                 page_tasks=page_tasks,
                 api_key=api_key,
                 model=effective_model,
+                thinking_level=thinking_level,
                 concurrency=concurrency,
                 max_retries=max_retries,
             )
@@ -2200,7 +2210,7 @@ def _extract_structured_pages(
     if use_vision and strategy in ("hybrid_pages", "full_document"):
         from .hybrid_vision import DEFAULT_MODEL, VisionPageTask, run_hybrid_vision_tasks
 
-        effective_model = vision_model or DEFAULT_MODEL
+        effective_model = (vision_model or "").strip() or DEFAULT_MODEL
         target_page_nums = (
             {u.unit_number for u in report.units if u.is_candidate}
             if strategy == "hybrid_pages"
@@ -2227,6 +2237,7 @@ def _extract_structured_pages(
             page_tasks=p_tasks,
             api_key=api_key,
             model=effective_model,
+            thinking_level=thinking_level,
             concurrency=concurrency,
             max_retries=max_retries,
         )
@@ -2245,11 +2256,12 @@ def _extract_markdown(
     vision_mode: str = "off",
     api_key: str | None = None,
     vision_model: str | None = None,
-    low_threshold: float = 0.30,
-    high_threshold: float = 0.70,
-    dpi: int = 200,
-    concurrency: int = 4,
-    max_retries: int = 5,
+    thinking_level: str | None = None,
+    low_threshold: float = DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = DEFAULT_HIGH_THRESHOLD,
+    dpi: int = DEFAULT_HYBRID_DPI,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> str:
     """Return Markdown text for *pdf_path*, saving images lazily to *image_dir*."""
     try:
@@ -2263,7 +2275,14 @@ def _extract_markdown(
         from .hybrid_vision import validate_vision_options
 
         validate_vision_options(
-            vision_mode, low_threshold, high_threshold, dpi, concurrency, max_retries
+            vision_mode,
+            low_threshold,
+            high_threshold,
+            dpi,
+            concurrency,
+            max_retries,
+            vision_model=vision_model,
+            thinking_level=thinking_level,
         )
 
     pdf_bytes = pdf_path.read_bytes()
@@ -2281,6 +2300,7 @@ def _extract_markdown(
                     vision_mode=vision_mode,
                     api_key=api_key,
                     vision_model=vision_model,
+                    thinking_level=thinking_level,
                     low_threshold=low_threshold,
                     high_threshold=high_threshold,
                     dpi=dpi,
@@ -2322,11 +2342,12 @@ def convert_pdf(
     vision_mode: str = "off",
     api_key: str | None = None,
     vision_model: str | None = None,
-    low_threshold: float = 0.30,
-    high_threshold: float = 0.70,
-    dpi: int = 200,
-    concurrency: int = 4,
-    max_retries: int = 5,
+    thinking_level: str | None = None,
+    low_threshold: float = DEFAULT_LOW_THRESHOLD,
+    high_threshold: float = DEFAULT_HIGH_THRESHOLD,
+    dpi: int = DEFAULT_HYBRID_DPI,
+    concurrency: int = DEFAULT_CONCURRENCY,
+    max_retries: int = DEFAULT_MAX_RETRIES,
 ) -> None:
     """Convert a single PDF to Markdown and write the result to *output_path*.
 
@@ -2345,6 +2366,7 @@ def convert_pdf(
         vision_mode=vision_mode,
         api_key=api_key,
         vision_model=vision_model,
+        thinking_level=thinking_level,
         low_threshold=low_threshold,
         high_threshold=high_threshold,
         dpi=dpi,

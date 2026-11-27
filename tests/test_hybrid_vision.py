@@ -51,6 +51,7 @@ class _FakeModels:
         inline_data = parts[1]["inline_data"]
         record = {
             "model": model,
+            "config": config,
             "prompt": prompt_text,
             "mime_type": inline_data["mime_type"],
             "data_len": len(inline_data["data"]),
@@ -444,3 +445,212 @@ def test_cli_screen_only_and_convert_tree_vision(tmp_path, monkeypatch, caplog):
     counts = convert_tree(src_dir, out_dir, vision_mode="auto", api_key=None)
     assert counts["pdf"] == 1
     assert "Simple text note." in (out_dir / "note.md").read_text(encoding="utf-8")
+
+
+def _make_detailed_bmp(width: int = 240, height: int = 120) -> bytes:
+    """Create a multi-color BMP image (non-PNG/non-JPEG raster)."""
+    img = Image.new("RGB", (width, height), (248, 250, 252))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle((12, 12, width // 2 - 8, height - 12), fill=(30, 90, 200))
+    draw.rectangle((width // 2 + 8, 20, width - 12, height - 20), fill=(40, 150, 90))
+    buf = io.BytesIO()
+    img.save(buf, format="BMP")
+    return buf.getvalue()
+
+
+def test_hybrid_model_and_thinking_level_forwarding_and_validation(tmp_path, monkeypatch):
+    from pdf_to_md import DEFAULT_MODEL
+    import pdf_to_md.main as main_module
+
+    assert DEFAULT_MODEL == "gemini-4-hydrogen"
+
+    pdf_path = tmp_path / "diagram.pdf"
+    doc = pymupdf.open()
+    try:
+        p1 = doc.new_page(width=595, height=842)
+        p1.insert_text((56, 72), "Page 1 prose.")
+        p1.insert_image(pymupdf.Rect(56, 120, 420, 320), stream=_make_detailed_png(300, 160))
+        p2 = doc.new_page(width=595, height=842)
+        p2.insert_text((56, 72), "Page 2 prose only.")
+        p3 = doc.new_page(width=595, height=842)
+        p3.insert_text((56, 72), "Page 3 prose only.")
+        p4 = doc.new_page(width=595, height=842)
+        p4.insert_text((56, 72), "Page 4 prose only.")
+        doc.save(pdf_path)
+    finally:
+        doc.close()
+
+    # 1. Default model ("gemini-4-hydrogen") and thinking_level=None -> omits thinking_config
+    default_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **ServiceA** -> **ServiceB**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: default_client)
+    convert_pdf(pdf_path, tmp_path / "out_default" / "diagram.md", vision_mode="auto", api_key="k")
+    assert len(default_client.models.calls) == 1
+    assert default_client.models.calls[0]["model"] == "gemini-4-hydrogen"
+    assert default_client.models.calls[0]["config"] == {"response_mime_type": "application/json"}
+
+    # 2. Explicit model + case-insensitive thinking_level on convert_pdf
+    custom_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **ServiceA** -> **ServiceB**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: custom_client)
+    convert_pdf(
+        pdf_path,
+        tmp_path / "out_custom" / "diagram.md",
+        vision_mode="auto",
+        api_key="k",
+        vision_model="gemini-3.8-flash",
+        thinking_level="XHIGH",
+    )
+    assert custom_client.models.calls[0]["model"] == "gemini-3.8-flash"
+    assert custom_client.models.calls[0]["config"] == {
+        "response_mime_type": "application/json",
+        "thinking_config": {"thinking_level": "XHIGH"},
+    }
+
+    # 3. Full-page mode + convert_office + convert_tree + CLI forwarding
+    page_client = _FakeAsyncClient(lambda prompt: {"markdown_body": "# Full page"})
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: page_client)
+    convert_pdf(
+        pdf_path,
+        tmp_path / "out_full" / "diagram.md",
+        vision_mode="full",
+        api_key="k",
+        vision_model="gemini-4-hydrogen",
+        thinking_level="low",
+    )
+    assert len(page_client.models.calls) == 4
+    assert all(
+        c["model"] == "gemini-4-hydrogen"
+        and c["config"]
+        == {
+            "response_mime_type": "application/json",
+            "thinking_config": {"thinking_level": "LOW"},
+        }
+        for c in page_client.models.calls
+    )
+
+    docx_path = tmp_path / "doc.docx"
+    _write_docx_with_image(docx_path, _make_detailed_png(280, 140))
+    office_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **Node**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: office_client)
+    convert_office(
+        docx_path,
+        tmp_path / "out_docx" / "doc.md",
+        vision_mode="auto",
+        api_key="k",
+        vision_model="gemini-3.8-flash",
+        thinking_level="medium",
+    )
+    assert office_client.models.calls[0]["model"] == "gemini-3.8-flash"
+    assert office_client.models.calls[0]["config"] == {
+        "response_mime_type": "application/json",
+        "thinking_config": {"thinking_level": "MEDIUM"},
+    }
+
+    tree_src = tmp_path / "tree_src"
+    tree_src.mkdir()
+    (tree_src / "diagram.pdf").write_bytes(pdf_path.read_bytes())
+    tree_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **Tree**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: tree_client)
+    convert_tree(
+        tree_src,
+        tmp_path / "tree_out",
+        vision_mode="auto",
+        api_key="k",
+        vision_model="gemini-4-hydrogen",
+        thinking_level="high",
+    )
+    assert tree_client.models.calls[0]["model"] == "gemini-4-hydrogen"
+    assert tree_client.models.calls[0]["config"]["thinking_config"] == {
+        "thinking_level": "HIGH"
+    }
+
+    cli_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **CLI**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: cli_client)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pdf-to-md",
+            str(pdf_path),
+            "-o",
+            str(tmp_path / "cli_out"),
+            "--vision",
+            "--api-key",
+            "k",
+            "--vision-model",
+            "gemini-3.8-flash",
+            "--vision-thinking-level",
+            "low",
+        ],
+    )
+    main_module.main()
+    assert cli_client.models.calls[0]["model"] == "gemini-3.8-flash"
+    assert cli_client.models.calls[0]["config"]["thinking_config"] == {
+        "thinking_level": "LOW"
+    }
+
+    # 4. Validation failures
+    with pytest.raises(ValueError, match="thinking_level"):
+        convert_pdf(
+            pdf_path,
+            tmp_path / "bad.md",
+            vision_mode="auto",
+            api_key="k",
+            thinking_level="ultra",
+        )
+    with pytest.raises(ValueError, match="thinking_level"):
+        hv.run_hybrid_vision_tasks(
+            image_tasks=[],
+            page_tasks=[],
+            api_key="k",
+            thinking_level="",
+        )
+    with pytest.raises(ValueError, match="vision_model"):
+        convert_pdf(
+            pdf_path,
+            tmp_path / "bad_model.md",
+            vision_mode="auto",
+            api_key="k",
+            vision_model="   ",
+        )
+
+
+def test_pptx_non_png_raster_is_converted_to_real_png(tmp_path, monkeypatch):
+    pptx_path = tmp_path / "bmp_deck.pptx"
+    bmp_bytes = _make_detailed_bmp(240, 120)
+    prs = Presentation()
+    for s_idx in range(4):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = f"Slide {s_idx + 1}"
+        slide.placeholders[1].text = f"Text {s_idx + 1}"
+        if s_idx == 1:
+            slide.shapes.add_picture(
+                io.BytesIO(bmp_bytes), Inches(1.5), Inches(2.5), width=Inches(4.0), height=Inches(2.0)
+            )
+    prs.save(str(pptx_path))
+
+    fake_client = _FakeAsyncClient(
+        lambda prompt: {"is_decorative": False, "markdown": "- **Diagram**"}
+    )
+    monkeypatch.setattr(hv, "_create_async_client", lambda api_key: fake_client)
+
+    out_md = tmp_path / "out" / "bmp_deck.md"
+    convert_office(pptx_path, out_md, vision_mode="auto", api_key="k")
+
+    saved_pngs = list((tmp_path / "out" / "bmp_deck_images").glob("*.png"))
+    assert len(saved_pngs) == 1
+    raw_saved = saved_pngs[0].read_bytes()
+    assert raw_saved.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(io.BytesIO(raw_saved)) as im:
+        assert im.format == "PNG"
+    assert len(fake_client.models.calls) == 1
+    assert fake_client.models.calls[0]["mime_type"] == "image/png"

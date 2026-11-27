@@ -1,7 +1,7 @@
 """PDF merger.
 
 Merges all PDF files found in a source directory into a single output PDF,
-using PyMuPDF (already a dependency via pymupdf4llm/pymupdf-layout).
+using PyMuPDF.
 
 Usage
 -----
@@ -26,7 +26,7 @@ DEFAULT_SOURCE_DIR_NAME = "pdf_to_merge"
 DEFAULT_OUTPUT_NAME = "merged.pdf"
 
 
-def merge_pdfs(source_dir: Path, output_path: Path) -> int:
+def merge_pdfs(source_dir: Path | str, output_path: Path | str) -> int:
     """Merge every ``.pdf`` file in *source_dir* into *output_path*.
 
     Files are merged in alphabetical filename order. Returns the number of
@@ -39,9 +39,14 @@ def merge_pdfs(source_dir: Path, output_path: Path) -> int:
             "Missing dependency. Install pymupdf to enable PDF merging."
         ) from exc
 
+    source_dir = Path(source_dir)
+    output_path = Path(output_path)
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Source directory not found: {source_dir}")
+
     pdf_paths = sorted(source_dir.glob("*.pdf"), key=lambda p: p.name.lower())
     if not pdf_paths:
-        raise SystemExit(f"No PDF files found in {source_dir}")
+        raise FileNotFoundError(f"No PDF files found in {source_dir}")
 
     merged = pymupdf.open()
     try:
@@ -90,7 +95,10 @@ def main() -> None:
         Path(args.output).resolve() if args.output else (Path.cwd() / DEFAULT_OUTPUT_NAME)
     )
 
-    count = merge_pdfs(source_dir, output_path)
+    try:
+        count = merge_pdfs(source_dir, output_path)
+    except FileNotFoundError as exc:
+        raise SystemExit(str(exc)) from exc
     LOGGER.info("Merged %d PDF(s) into %s", count, output_path)
 
 

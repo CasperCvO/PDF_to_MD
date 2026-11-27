@@ -2,7 +2,7 @@
 
 Adds multimodal extraction of presentations (PDF/PPTX) and pre-rendered slide
 images (PNG/JPEG) into structured Markdown via the Google Gemini API
-(``gemini-3.7-flash`` by default). This is an *add-on*: it does not replace or
+(``gemini-4-hydrogen`` by default). This is an *add-on*: it does not replace or
 modify the existing local converters (``convert_pdf``, ``convert_office``).
 
 The module targets presentations that mix native text with embedded UI
@@ -55,12 +55,14 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 
 LOGGER = logging.getLogger(__name__)
 
 API_KEY_ENV_VAR = "GEMINI_API_KEY"
-DEFAULT_MODEL = "gemini-3.7-flash"
+DEFAULT_MODEL = "gemini-4-hydrogen"
+ThinkingLevel = Literal["minimal", "low", "medium", "high", "xhigh"]
+VALID_THINKING_LEVELS: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh")
 DEFAULT_DPI = 300
 DEFAULT_CONCURRENCY = 4
 DEFAULT_MAX_RETRIES = 5
@@ -147,12 +149,35 @@ class SlideResult:
 # ---------------------------------------------------------------------------
 
 
+def _normalize_thinking_level(thinking_level: str | None) -> str | None:
+    """Validate and normalize *thinking_level* (lowercase) or return None."""
+    if thinking_level is None:
+        return None
+    normalized = thinking_level.strip().lower()
+    if normalized not in VALID_THINKING_LEVELS:
+        raise ValueError(
+            f"thinking_level must be one of {VALID_THINKING_LEVELS} "
+            f"(got {thinking_level!r})"
+        )
+    return normalized
+
+
+def _build_generate_config(thinking_level: str | None) -> dict[str, object]:
+    """Build a Gemini GenerateContentConfig dict for JSON extraction."""
+    config: dict[str, object] = {"response_mime_type": "application/json"}
+    normalized = _normalize_thinking_level(thinking_level)
+    if normalized is not None:
+        config["thinking_config"] = {"thinking_level": normalized.upper()}
+    return config
+
+
 def convert_presentation_vision(
     input_path: Path | str,
     output_dir: Path | str | None = None,
     *,
     api_key: str | None = None,
     model: str = DEFAULT_MODEL,
+    thinking_level: str | None = None,
     dpi: int = DEFAULT_DPI,
     export_format: str = "md",
     concurrency: int = DEFAULT_CONCURRENCY,
@@ -178,7 +203,12 @@ def convert_presentation_vision(
         used. Only required when slides are analyzed with vision (never for the
         LibreOffice-less pptx text fallback).
     model : str, optional
-        Gemini model id (default ``gemini-3.7-flash``).
+        Gemini model id (default ``gemini-4-hydrogen``).
+    thinking_level : str | None, optional
+        Gemini thinking level: ``"minimal"``, ``"low"``, ``"medium"``,
+        ``"high"``, or ``"xhigh"`` (default None uses the model's default;
+        ``gemini-4-hydrogen`` supports ``"low"``, ``"medium"``, ``"high"``,
+        and ``"xhigh"``).
     dpi : int, optional
         Render resolution for PDF/PPTX pages (default 300).
     export_format : str, optional
@@ -199,7 +229,16 @@ def convert_presentation_vision(
     list[Path]
         Paths of all files written (Markdown and/or JSON).
     """
-    _validate_options(export_format, dpi, concurrency, max_retries, page_start, page_end, model)
+    _validate_options(
+        export_format,
+        dpi,
+        concurrency,
+        max_retries,
+        page_start,
+        page_end,
+        model,
+        thinking_level,
+    )
 
     input_path = Path(input_path).resolve()
     if not input_path.exists():
@@ -243,6 +282,7 @@ def convert_presentation_vision(
                     output_dir,
                     api_key=api_key,
                     model=model,
+                    thinking_level=thinking_level,
                     dpi=dpi,
                     export_format=export_format,
                     concurrency=concurrency,
@@ -582,12 +622,20 @@ async def _extract_all_async(
     extraction_prompt: str,
     concurrency: int,
     max_retries: int,
+    thinking_level: str | None = None,
 ) -> list[SlideResult]:
     """Run vision extraction for *pages* with bounded concurrency and retries."""
     client = _create_async_client(api_key)
     try:
         return await _process_slides(
-            client, model, pages, document_source, extraction_prompt, concurrency, max_retries
+            client,
+            model,
+            pages,
+            document_source,
+            extraction_prompt,
+            concurrency,
+            max_retries,
+            thinking_level=thinking_level,
         )
     finally:
         await client.aclose()
@@ -601,6 +649,7 @@ async def _process_slides(
     extraction_prompt: str,
     concurrency: int,
     max_retries: int,
+    thinking_level: str | None = None,
 ) -> list[SlideResult]:
     """Fan out per-slide extraction across a semaphore-bounded pool."""
     semaphore = asyncio.Semaphore(concurrency)
@@ -608,7 +657,13 @@ async def _process_slides(
     async def worker(page: SlidePage) -> SlideResult:
         async with semaphore:
             return await _extract_slide_with_retry(
-                client, model, page, document_source, extraction_prompt, max_retries
+                client,
+                model,
+                page,
+                document_source,
+                extraction_prompt,
+                max_retries,
+                thinking_level=thinking_level,
             )
 
     return await asyncio.gather(*(worker(page) for page in pages))
@@ -621,6 +676,7 @@ async def _extract_slide_with_retry(
     document_source: str,
     extraction_prompt: str,
     max_retries: int,
+    thinking_level: str | None = None,
 ) -> SlideResult:
     """Extract one slide, retrying transient failures with exponential backoff."""
     last_error: BaseException | None = None
@@ -628,7 +684,14 @@ async def _extract_slide_with_retry(
     for attempt in range(max_retries + 1):
         attempts_made = attempt + 1
         try:
-            result = await _extract_slide_once(client, model, page, document_source, extraction_prompt)
+            result = await _extract_slide_once(
+                client,
+                model,
+                page,
+                document_source,
+                extraction_prompt,
+                thinking_level=thinking_level,
+            )
             LOGGER.info(
                 "Extracted slide %d (%s) with %d technology tag(s).",
                 page.slide_number,
@@ -662,6 +725,7 @@ async def _extract_slide_once(
     page: SlidePage,
     document_source: str,
     extraction_prompt: str,
+    thinking_level: str | None = None,
 ) -> SlideResult:
     """Send one slide image to the vision model and parse the JSON response."""
     prompt = _build_slide_prompt(extraction_prompt, page, document_source)
@@ -678,7 +742,7 @@ async def _extract_slide_once(
         client.models.generate_content(
             model=model,
             contents=contents,
-            config={"response_mime_type": "application/json"},
+            config=_build_generate_config(thinking_level),
         ),
         timeout=180,
     )
@@ -767,11 +831,15 @@ def _is_retryable(exc: BaseException) -> bool:
         return True
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return True
-    try:
-        import httpx
-    except ImportError:
-        return False
-    return isinstance(exc, httpx.TransportError)
+    for mod_name in ("httpx", "httpx2"):
+        try:
+            mod = __import__(mod_name)
+        except ImportError:
+            continue
+        transport_err = getattr(mod, "TransportError", None)
+        if transport_err is not None and isinstance(exc, transport_err):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +914,7 @@ def _convert_one(
     *,
     api_key: str | None,
     model: str,
+    thinking_level: str | None = None,
     dpi: int,
     export_format: str,
     concurrency: int,
@@ -895,6 +964,7 @@ def _convert_one(
                 extraction_prompt,
                 concurrency,
                 max_retries,
+                thinking_level=thinking_level,
             )
         )
     else:
@@ -946,6 +1016,7 @@ def _validate_options(
     page_start: int | None,
     page_end: int | None,
     model: str,
+    thinking_level: str | None = None,
 ) -> None:
     """Validate user-facing options and raise ValueError with clear messages."""
     if export_format not in ("md", "json", "both"):
@@ -964,6 +1035,7 @@ def _validate_options(
         raise ValueError(f"page_start ({page_start}) must not exceed page_end ({page_end})")
     if not model.strip():
         raise ValueError("model must not be empty")
+    _normalize_thinking_level(thinking_level)
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1099,16 @@ def main() -> None:
         help=f"Gemini model id (default: {DEFAULT_MODEL}).",
     )
     parser.add_argument(
+        "--thinking-level",
+        type=str.lower,
+        choices=list(VALID_THINKING_LEVELS),
+        default=None,
+        help=(
+            "Gemini thinking level: minimal, low, medium, high, or xhigh "
+            "(default: model default; gemini-4-hydrogen supports low/medium/high/xhigh)."
+        ),
+    )
+    parser.add_argument(
         "--concurrency",
         type=int,
         default=DEFAULT_CONCURRENCY,
@@ -1057,7 +1139,7 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     # Keep third-party SDK noise (httpx request lines, AFC notices/warnings) out of the CLI.
-    for noisy_logger in ("httpx", "httpcore"):
+    for noisy_logger in ("httpx", "httpx2", "httpcore", "httpcore2"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
     logging.getLogger("google_genai").setLevel(logging.ERROR)
 
@@ -1072,6 +1154,7 @@ def main() -> None:
             args.output_dir,
             api_key=args.api_key,
             model=args.model,
+            thinking_level=args.thinking_level,
             dpi=args.dpi,
             export_format=args.export_format,
             concurrency=args.concurrency,

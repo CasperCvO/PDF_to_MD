@@ -80,9 +80,6 @@ def test_convert_pdf_fallback_adds_page_markers(tmp_path, monkeypatch):
     monkeypatch.setattr(
         pdf_conv, "_extract_structured_pages", _failing_extractor, raising=False
     )
-    import pymupdf4llm
-
-    monkeypatch.setattr(pymupdf4llm, "to_markdown", _failing_extractor)
 
     pdf_path = tmp_path / "sample.pdf"
     _write_test_pdf(pdf_path)

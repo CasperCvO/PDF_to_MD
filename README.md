@@ -18,11 +18,11 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 - **PDF page markers** — every PDF page starts with a `<!-- page: N -->` marker (including empty pages) so downstream consumers can trace content back to its source page.
 - **XLSX sheet/cell locators** — `.xlsx` workbooks are converted with openpyxl into `## Sheet: Name` sections with `<!-- sheet: "Name" range: A1:D4 -->` markers and row/column-addressed tables, so every value stays addressable as `Sheet!B7`.
 - **DOCX page markers** *(approximate)* — `.docx` output gets `<!-- page: N -->` markers taken from Word's saved layout (`w:lastRenderedPageBreak`). When the file wasn't last saved by Word (e.g. LibreOffice, Google Docs, python-docx), it falls back to manual page breaks, page-break-before paragraphs, and page-starting section breaks — so positions are approximate. Disable with `docx_page_markers=False` / `--no-docx-page-markers`.
-- **Fallback** — if pymupdf4llm fails for a PDF, plain text is extracted via PyMuPDF.
+- **Fallback** — if structured PDF extraction fails for a PDF, plain text is extracted via PyMuPDF.
 - **PDF Merger** — merge multiple PDF files in alphabetical order into a single PDF.
 - **Vision-based slide extraction** *(add-on)* — extract structured Markdown from
   presentations containing native text, embedded UI screenshots, terminal dumps, and
-  metric dashboards using the Gemini vision API (`gemini-3.7-flash`). Slide-by-slide
+  metric dashboards using the Gemini vision API (`gemini-4-hydrogen`). Slide-by-slide
   multimodal extraction with YAML frontmatter, Markdown table/code-block reconstruction,
   unified JSON export, concurrency, and exponential-backoff retries.
 
@@ -30,7 +30,7 @@ Batch-convert PDFs and office documents to Markdown while preserving tables, hea
 
 | Extension | Type                | Converter             |
 | --------- | ------------------- | --------------------- |
-| `.pdf`    | PDF                 | pymupdf4llm / PyMuPDF |
+| `.pdf`    | PDF                 | PyMuPDF               |
 | `.docx`   | Word                | markitdown (+ page markers) |
 | `.doc`    | Word (legacy)       | markitdown            |
 | `.xlsx`   | Excel               | openpyxl (cell locators) |
@@ -51,7 +51,7 @@ Requires **Python 3.13+**.
 Add this repository directly to your target project with `uv`:
 
 ```bash
-uv add git+https://github.com/<username>/PDF_to_MD.git
+uv add git+https://github.com/CasperCvO/PDF_to_MD.git
 ```
 
 Or declare it in your target project's `pyproject.toml`:
@@ -59,7 +59,7 @@ Or declare it in your target project's `pyproject.toml`:
 ```toml
 [project]
 dependencies = [
-    "pdf-to-md @ git+https://github.com/<username>/PDF_to_MD.git"
+    "pdf-to-md @ git+https://github.com/CasperCvO/PDF_to_MD.git"
 ]
 ```
 
@@ -67,7 +67,7 @@ dependencies = [
 
 ```bash
 # Clone the repository
-git clone <repo-url>
+git clone https://github.com/CasperCvO/PDF_to_MD.git
 cd PDF_to_MD
 
 # Install dependencies and editable package
@@ -103,10 +103,12 @@ print(report.vision_ratio, report.recommended_strategy, report.candidate_unit_nu
 convert_pdf(
     Path("path/to/architecture.pdf"),
     Path("path/to/architecture.md"),
-    vision_mode="auto",        # "off" (default) | "auto" | "images" | "pages" | "full"
-    low_threshold=0.30,        # <= 30%: targeted image + context extraction
-    high_threshold=0.70,       # > 70%: full-document vision; 30-70%: hybrid pages
-    api_key="YOUR_GEMINI_KEY", # or set GEMINI_API_KEY / .env (not needed if 0% visual)
+    vision_mode="auto",              # "off" (default) | "auto" | "images" | "pages" | "full"
+    vision_model="gemini-4-hydrogen", # default model
+    thinking_level="low",            # None (model default) | "minimal" | "low" | "medium" | "high" | "xhigh"
+    low_threshold=0.30,              # <= 30%: targeted image + context extraction
+    high_threshold=0.70,             # > 70%: full-document vision; 30-70%: hybrid pages
+    api_key="YOUR_GEMINI_KEY",       # or set GEMINI_API_KEY / .env (not needed if 0% visual)
 )
 
 convert_tree("path/to/docs", output_root="out", vision_mode="auto")
@@ -122,13 +124,15 @@ convert_tree("path/to/docs", output_root="out", docx_page_markers=False)
 # 5. Merge all PDFs in a folder into one PDF
 merge_pdfs(Path("path/to/pdf_folder"), Path("path/to/merged.pdf"))
 
-# 5. Vision-based slide extraction (Gemini API; add-on, does not affect 1-4)
+# 6. Vision-based slide extraction (Gemini API; add-on, does not affect 1-5)
 from pdf_to_md import convert_presentation_vision
 
 written = convert_presentation_vision(
     "path/to/presentation.pdf",   # .pdf, .pptx, .png/.jpg/.jpeg, or a directory
     "path/to/output_markdown",
     api_key="YOUR_GEMINI_API_KEY",  # or set the GEMINI_API_KEY env var
+    model="gemini-4-hydrogen",
+    thinking_level="low",  # None (model default) | "minimal" | "low" | "medium" | "high" | "xhigh"
     dpi=300,
     export_format="both",  # "md" (default) | "json" | "both"
     concurrency=4,
@@ -177,7 +181,7 @@ python merge_pdfs.py [source_dir] [-o output.pdf]
 - **`--vision-mode {off,auto,images,pages,full}`** — Vision strategy (`off` by default).
 - **`--vision-low-threshold FLOAT`** / **`--vision-high-threshold FLOAT`** — Visual page ratio boundaries for `auto` routing (`0.30` and `0.70` by default).
 - **`--screen-only`** — Screen supported files and log each document's visual page ratio and recommended strategy without writing files or calling the API.
-- **`--api-key`**, **`--vision-model`**, **`--vision-dpi`**, **`--vision-concurrency`**, **`--vision-max-retries`** — Gemini API configuration for hybrid vision runs.
+- **`--api-key`**, **`--vision-model`** (default: `gemini-4-hydrogen`), **`--vision-thinking-level`** (`minimal`, `low`, `medium`, `high`, `xhigh`; default: model default, `gemini-4-hydrogen` supports `low`, `medium`, `high`, `xhigh`), **`--vision-dpi`**, **`--vision-concurrency`**, **`--vision-max-retries`** — Gemini API configuration for hybrid vision runs.
 
 ### Directory Tree Example
 
@@ -192,11 +196,11 @@ Reports_MD/
   subdir/
     Report.md
     Report_images/
-      img-0001.png
+      Report-p001-img01.png
     Meeting_Notes.md
   AnnualReview.md
   AnnualReview_images/
-    img-0001.png
+    AnnualReview-p001-img01.png
   Budget.md
 ```
 
@@ -281,7 +285,7 @@ unchanged and still work without an API key.
    Raw `.png`/`.jpg`/`.jpeg` slide images are validated (mime type, resolution,
    color depth) before being sent.
 2. **Slide-by-slide extraction** — each slide image is sent to
-   `gemini-3.7-flash` together with a structured extraction prompt
+   `gemini-4-hydrogen` together with a structured extraction prompt
    (JSON mode: `topic`, `technologies`, `markdown_body`). Native PDF text is
    included as a transcription hint.
 3. **Structured output** — one self-contained Markdown file per slide with YAML
@@ -309,7 +313,8 @@ pdf-to-md-vision --input-path presentations_dir --page-start 1 --page-end 10
 | `--dpi` | Render resolution for PDF/PPTX pages (default: 300). |
 | `--export-format` | `md` (per-slide Markdown, default), `json` (unified array), or `both`. |
 | `--api-key` | Gemini API key (default: `GEMINI_API_KEY` environment variable, or a `.env` file in the working directory). |
-| `--model` | Gemini model id (default: `gemini-3.7-flash`). |
+| `--model` | Gemini model id (default: `gemini-4-hydrogen`). |
+| `--thinking-level` | Gemini thinking level: `minimal`, `low`, `medium`, `high`, or `xhigh` (default: model default; `gemini-4-hydrogen` supports `low`/`medium`/`high`/`xhigh`). |
 | `--concurrency` | Max simultaneous API requests (default: 4). |
 | `--max-retries` | Retries per slide for transient failures (default: 5). |
 | `--page-start`, `--page-end` | 1-based inclusive slide range to process. |
@@ -363,7 +368,7 @@ PDF_to_MD/
 │       ├── hybrid_vision.py    # Document vision screening & single-file hybrid orchestration
 │       ├── vision_converter.py # Per-slide Gemini vision extraction (convert_presentation_vision)
 │       └── merge_pdfs.py       # PDF merger (merge_pdfs)
-├── tests/                      # pytest suite (PDF page markers, XLSX locators)
+├── tests/                      # pytest suite (PDF, Office, hybrid vision, slide vision, and PDF merger)
 ├── main.py                     # Convenience root launcher
 └── merge_pdfs.py               # Convenience root launcher
 ```
